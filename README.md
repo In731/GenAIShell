@@ -181,15 +181,4 @@ docker build -t genai-shell .
 
 # 2. Run container in interactive mode mounting local data persistent folder
 docker run -it -e GEMINI_API_KEY="AIzaSy..." -v "$(pwd)/data:/app/data" genai-shell interactive
-```
 
----
-
-## 🎙️ Interview-Ready Design Decisions (SOLID & Clean Architecture)
-
-If explaining this project during a backend or AI architecture interview, focus on the following:
-
-- **Dependency Inversion Principle**: The `AgentLoop` takes an injectable `confirm_callback`. The core reasoning engine knows *nothing* about console prompts, click UI, or web APIs. It simply receives a boolean, making it 100% testable and decoupled from Typer or Web applications.
-- **Single Responsibility Principle**: The vector math engine (`LightweightVectorStore`) calculates vector cosine similarities without hardcoding standard API connections. Standard embeddings are calculated at the core orchestrator layer and injected into the database.
-- **Native Vector Implementation**: Built with local NumPy rather than loading binary-heavy databases like FAISS or ChromaDB. This proves full mathematical understanding of vector projections, dot-products, magnitudes, and similarity rankings while maintaining zero installation friction.
-- **Asynchronous Loop Non-Blocking**: Harnesses Python's async subprocess streams (`asyncio.create_subprocess_shell`) to ensure console event monitors are completely non-blocking, and timeouts terminate process trees cleanly.
