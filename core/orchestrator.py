@@ -1,4 +1,3 @@
-import google.generativeai as genai
 from typing import List, Dict, Any, Optional
 from config.settings import settings
 from utils.logging import logger
@@ -6,45 +5,44 @@ from storage.memory import MemoryManager
 from storage.vector_store import LightweightVectorStore
 
 class GeminiOrchestrator:
-    """Manages the Gemini API connection, prompt orchestration, and vector embedding creation."""
+    """Manages semantic embedding creation using local sentence-transformers."""
 
     def __init__(self):
-        self.api_key = settings.gemini_api_key
-        if not self.api_key:
-            logger.warning("GEMINI_API_KEY environment variable is not set. AI operations will fail.")
-        else:
-            genai.configure(api_key=self.api_key)
-            logger.info("Successfully configured Gemini API Client.")
-            
-        self.model_name = settings.gemini_model
         self.memory = MemoryManager()
         self.vector_store = LightweightVectorStore()
+        self._embedding_model = None
+
+    def _get_model(self):
+        if self._embedding_model is None:
+            try:
+                from sentence_transformers import SentenceTransformer
+                logger.info("Loading local sentence-transformers model (this may take a moment on first run)...")
+                self._embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+            except ImportError:
+                logger.error("sentence-transformers not installed. Embeddings will fail.")
+                return None
+        return self._embedding_model
 
     def get_embedding(self, text: str) -> Optional[List[float]]:
-        """Generates a high-quality semantic embedding vector for RAG queries using Gemini's embedding model."""
-        if not self.api_key:
-            logger.error("Cannot generate embedding: Gemini API Key is missing.")
-            return None
+        """Generates a semantic embedding vector using local model."""
+        model = self._get_model()
+        if not model:
+            return self._fallback_embedding(text)
+            
         try:
-            # We use standard 'models/text-embedding-004' for standard vector dimensions (768)
-            result = genai.embed_content(
-                model="models/text-embedding-004",
-                contents=text,
-                task_type="retrieval_document"
-            )
-            embedding = result.get("embedding", [])
-            if not embedding:
-                # Fallback check
-                embedding = result.get("embeddings", [[]])[0]
-            return embedding
+            embedding = model.encode(text)
+            # all-MiniLM-L6-v2 returns 384 dimensions. Duplicate it to 768 to match original schema!
+            emb_list = embedding.tolist()
+            return emb_list + emb_list
         except Exception as e:
-            logger.error(f"Error generating embedding from Gemini API: {e}", exc_info=True)
-            # Create a simple hash-based pseudo-embedding fallback in case of connection outages
-            # to prevent application crashes during local testing
-            import hashlib
-            h = hashlib.sha256(text.encode("utf-8")).digest()
-            fallback = [float(b) / 255.0 for b in h] * 24  # Pad to 768 elements
-            return fallback[:768]
+            logger.error(f"Error generating embedding from local model: {e}", exc_info=True)
+            return self._fallback_embedding(text)
+
+    def _fallback_embedding(self, text: str) -> List[float]:
+        import hashlib
+        h = hashlib.sha256(text.encode("utf-8")).digest()
+        fallback = [float(b) / 255.0 for b in h] * 24
+        return fallback[:768]
 
     def add_to_rag_store(self, text: str, category: str = "General") -> None:
         """Helper to generate an embedding for text and save it to the semantic Vector Store."""

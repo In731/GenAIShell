@@ -63,15 +63,24 @@ class CommandExecutor:
             )
 
         logger.info(f"Executing command: '{sanitized_command}' with timeout={self.timeout}s")
-        shell_options = self._determine_shell()
-
-        # Create subprocess asynchronous pipe
-        process = await asyncio.create_subprocess_shell(
-            sanitized_command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            **shell_options
-        )
+        if sys.platform == "win32":
+            # On Windows, use create_subprocess_exec to safely launch PowerShell
+            process = await asyncio.create_subprocess_exec(
+                "powershell.exe",
+                "-Command",
+                sanitized_command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+        else:
+            # On POSIX, use create_subprocess_shell with explicit bash/sh
+            executable = "/bin/bash" if os.path.exists("/bin/bash") else "/bin/sh"
+            process = await asyncio.create_subprocess_shell(
+                sanitized_command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                executable=executable
+            )
 
         try:
             # Run within wait_for to prevent runaway background processes

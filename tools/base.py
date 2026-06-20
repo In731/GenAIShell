@@ -21,11 +21,48 @@ class ToolRegistry:
         """Retrieves registered tool callable reference by name."""
         return self._tools.get(name)
 
+    def get_openai_schemas(self) -> List[Dict[str, Any]]:
+        """Converts registered tools into OpenAI/Groq compatible JSON schemas."""
+        schemas = []
+        for name, func in self._tools.items():
+            sig = inspect.signature(func)
+            doc = inspect.getdoc(func) or f"Tool {name}"
+            
+            properties = {}
+            required = []
+            
+            for param_name, param in sig.parameters.items():
+                if param_name == 'self':
+                    continue
+                param_type = "string"
+                if param.annotation != inspect.Parameter.empty:
+                    if param.annotation is int: param_type = "integer"
+                    elif param.annotation is bool: param_type = "boolean"
+                    elif param.annotation is float: param_type = "number"
+                
+                properties[param_name] = {"type": param_type}
+                if param.default == inspect.Parameter.empty:
+                    required.append(param_name)
+                    
+            schemas.append({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": doc.split('\\n')[0][:1024],
+                    "parameters": {
+                        "type": "object",
+                        "properties": properties,
+                        "required": required
+                    }
+                }
+            })
+        return schemas
+
     def list_tools(self) -> List[Callable[..., Any]]:
         """Lists all registered tool callables."""
         return list(self._tools.values())
 
-    def execute_tool(self, name: str, **kwargs) -> str:
+    async def execute_tool(self, name: str, **kwargs) -> str:
         """Invokes a registered tool dynamically with arguments and captures output as string.
         
         Args:
@@ -42,25 +79,11 @@ class ToolRegistry:
         try:
             logger.info(f"Invoking Tool: '{name}' with args: {kwargs}")
             
-            # If function is async, we run it in a separate event loop or run it synchronously
-            # In our case, tools will be standard synchronous functions or we check if coroutine
             if inspect.iscoroutinefunction(tool_func):
-                # Standard trick to run async in sync: run it in executor or run_until_complete
-                # Since we run inside async orchestrator, let's keep all tools sync or let executor run them
-                # For high reliability, let's write tools as sync, or support both gracefully
-                import asyncio
-                try:
-                    loop = asyncio.get_running_loop()
-                    # If we have an active loop, we schedule it as task
-                    future = asyncio.run_coroutine_threadsafe(tool_func(**kwargs), loop)
-                    result = future.result()
-                except RuntimeError:
-                    # No active loop, use run
-                    result = asyncio.run(tool_func(**kwargs))
+                result = await tool_func(**kwargs)
             else:
                 result = tool_func(**kwargs)
 
-            # Cast results to string representation
             if result is None:
                 return "Operation completed successfully with no return value."
             return str(result)

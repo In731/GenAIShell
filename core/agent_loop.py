@@ -1,8 +1,7 @@
+import json
 import asyncio
 from typing import Callable, List, Dict, Any, Optional
-import google.generativeai as genai
-from google.generativeai.types import content_types
-from google.api_core.exceptions import ResourceExhausted
+from groq import Groq
 from config.settings import settings
 from utils.logging import logger
 from storage.memory import MemoryManager
@@ -24,7 +23,6 @@ async def run_system_shell_command(command: str) -> str:
     executor = CommandExecutor()
     res = await executor.execute(command)
     
-    # Return formatted result
     output = ""
     if res.stdout:
         output += f"--- STDOUT ---\n{res.stdout.strip()}\n"
@@ -36,60 +34,45 @@ async def run_system_shell_command(command: str) -> str:
         
     return f"Exit Code: {res.exit_code}\n{output}"
 
-
 class AgentLoop:
-    """Orchestrates ReAct agent operations, executing multi-step goals securely with User-in-the-Loop validations."""
+    """Orchestrates ReAct agent operations securely with Groq SDK."""
 
     def __init__(
         self,
         session_id: str,
         confirm_callback: Optional[Callable[[str, str], bool]] = None
     ):
-        """
-        Args:
-            session_id: Persistence identifier for SQLite history.
-            confirm_callback: Injectable user prompt callback (takes command_string, explanation and returns bool).
-        """
         self.session_id = session_id
         self.memory = MemoryManager()
-        # Default fallback synchronous terminal confirmation check if no callback injected
         self.confirm_callback = confirm_callback or self._default_confirm
 
-        # Build System Instructions establishing system boundaries
         self.system_instruction = (
-            "You are GenAIShell, an expert GenAI terminal shell assistant.\n"
+            "You are GenAIShell, an expert terminal shell assistant.\n"
             "Your objective is to translate natural language goals into precise terminal actions, "
             "explain diagnostics, search resources, or modify files.\n\n"
             "OPERATING GUIDELINES:\n"
             "1. You have a set of local system tools at your disposal (like listing processes, file operations, git).\n"
             "2. To run standard terminal shells, invoke the tool `run_system_shell_command` with your command.\n"
-            "3. ALWAYS explain your plan to the user in short sentences before running tools.\n"
-            "4. If a shell command or tool operation is blocked or fails, analyze the error and try a different safe route.\n"
-            "5. Make sure commands are compatible with the user's current shell environment.\n"
-            "6. Break complex requests down into sequential tool invocations (multi-step planning)."
+            "3. CONVERSATIONAL PERMISSION: Before running ANY shell commands or file modifications, you MUST first explain exactly what commands you plan to run and explicitly ask the user for permission in your chat response. DO NOT invoke the tool until the user replies with 'yes' or 'go ahead'.\n"
+            "4. IMPORTANT EXECUTIONS: When the user grants permission (e.g. says 'yes'), you MUST immediately use the provided tool-calling API to execute the command. Do NOT just say 'Okay, I will do it' and stop. You MUST trigger the function natively!\n"
+            "5. If a shell command or tool operation is blocked or fails, analyze the error and try a different safe route.\n"
+            "6. Make sure commands are compatible with the user's current shell environment.\n"
+            "7. Break complex requests down into sequential tool invocations."
         )
 
-        # Configure the Gemini SDK with the API key from .env BEFORE creating the model.
-        # Without this call the SDK has no key and raises "No API_KEY or ADC found".
-        if not settings.gemini_api_key:
+        if not settings.groq_api_key:
             raise ValueError(
-                "GEMINI_API_KEY is not set. Please add it to your .env file:\n"
-                "  GEMINI_API_KEY=your_key_here"
+                "GROQ_API_KEY is not set. Please add it to your .env file:\n"
+                "  GROQ_API_KEY=your_key_here"
             )
-        genai.configure(api_key=settings.gemini_api_key)
-        logger.info("Gemini API key configured successfully.")
-
-        # Initialize the Gemini Model with all registered tools
-        self.model = genai.GenerativeModel(
-            model_name=settings.gemini_model,
-            tools=tool_registry.list_tools(),
-            system_instruction=self.system_instruction
-        )
-        self.chat = self.model.start_chat()
+        self.client = Groq(api_key=settings.groq_api_key)
+        self.model_name = settings.groq_model
+        logger.info("Groq API client configured successfully.")
+        
+        self.history = []
         self._load_chat_history()
 
     def _default_confirm(self, command: str, reason: str) -> bool:
-        """Fallback console confirmation prompter."""
         print(f"\n[bold yellow][SECURITY INTERCEPT][/bold yellow]")
         print(f"Action: {command}")
         print(f"Reason: {reason}")
@@ -97,102 +80,96 @@ class AgentLoop:
         return ans in ("y", "yes")
 
     def _load_chat_history(self) -> None:
-        """Syncs the Gemini API chat context memory with SQLite's session database."""
+        self.history = [{"role": "system", "content": self.system_instruction}]
         db_messages = self.memory.get_messages(self.session_id, limit=20)
         if not db_messages:
             return
 
-        # Pre-populate history in the active Gemini conversation channel
-        history = []
         for msg in db_messages:
-            role = msg["role"]
-            content = msg["content"]
-            # Convert roles to Gemini spec (Gemini uses 'user' and 'model')
-            gemini_role = "user" if role == "user" else "model"
-            history.append(
-                content_types.Content(
-                    role=gemini_role,
-                    parts=[content_types.Part.from_text(text=content)]
-                )
-            )
-        self.chat.history = history
-        logger.debug(f"Synced {len(history)} messages from persistent storage into active session.")
+            role = "user" if msg["role"] == "user" else "assistant"
+            self.history.append({"role": role, "content": msg["content"]})
+        logger.debug(f"Synced {len(db_messages)} messages from storage.")
 
     async def execute_goal(self, user_prompt: str, streaming_callback: Optional[Callable[[str], None]] = None) -> str:
-        """Runs the ReAct execution loop, coordinating multi-step actions to satisfy the high-level user goal.
-        
-        Args:
-            user_prompt: Natural language command typed by user.
-            streaming_callback: Optional function to pipe output streams back to the UI.
-            
-        Returns:
-            The final conversational response text.
-        """
-        # Save user message to persistent DB
         self.memory.add_message(self.session_id, "user", user_prompt)
+        self.history.append({"role": "user", "content": user_prompt})
         
-        current_prompt = user_prompt
         max_steps = 6
         step = 0
-        
         logger.info(f"Initiating Agent loop for session {self.session_id} - Goal: '{user_prompt}'")
 
         while step < max_steps:
             step += 1
             logger.debug(f"ReAct Loop Step {step}/{max_steps}")
 
-            # Send prompt and wait for generation response (with rate-limit retry support)
-            response = None
             retries = 3
             backoff = 5
+            response = None
             for attempt in range(retries):
                 try:
-                    response = self.chat.send_message(current_prompt)
+                    # Execute Groq API Call
+                    response = self.client.chat.completions.create(
+                        model=self.model_name,
+                        messages=self.history,
+                        tools=tool_registry.get_openai_schemas(),
+                        tool_choice="auto"
+                    )
                     break
-                except ResourceExhausted as e:
+                except Exception as e:
                     if attempt == retries - 1:
-                        logger.error("Rate limit hit repeatedly. Exceeded max retries.")
+                        logger.error("API error hit repeatedly. Exceeded max retries.")
                         raise e
-                    logger.warning(f"Rate limit hit (429). Retrying in {backoff} seconds... (Attempt {attempt+1}/{retries})")
-                    print(f"\n[bold yellow][RATE LIMIT INTERCEPT][/bold yellow] Quota exceeded. Waiting {backoff} seconds to retry...\n")
+                    logger.warning(f"API Error. Retrying in {backoff} seconds... (Attempt {attempt+1}/{retries})")
                     await asyncio.sleep(backoff)
                     backoff *= 2
 
-            # Check if Gemini wants to invoke a tool
-            tool_calls = response.candidates[0].content.parts
-            function_calls = [part.function_call for part in tool_calls if part.function_call]
+            message = response.choices[0].message
 
-            if not function_calls:
-                # No function calls means agent finished reasoning!
-                final_text = response.text
-                self.memory.add_message(self.session_id, "model", final_text)
+            # If no tool calls, generation is complete
+            if not message.tool_calls:
+                final_text = message.content or ""
                 
-                # Render to CLI stream if callback attached
+                # Intercept Llama 3 tool hallucinations
+                if "<function" in final_text or "{\"command\":" in final_text:
+                    logger.warning("Intercepted Llama 3 tool hallucination tag. Forcing retry.")
+                    self.history.append({"role": "assistant", "content": final_text})
+                    self.history.append({
+                        "role": "user", 
+                        "content": "You wrote the function call as raw text instead of using the native tool API. You MUST trigger the function natively using the API now!"
+                    })
+                    continue
+                
+                self.memory.add_message(self.session_id, "model", final_text)
                 if streaming_callback:
                     streaming_callback(final_text)
                 return final_text
 
-            # Execute tool calls
-            for call in function_calls:
-                name = call.name
-                args = dict(call.args)
+            # Add the model's tool calls to the history
+            self.history.append({
+                "role": "assistant",
+                "content": message.content,
+                "tool_calls": [t.model_dump() for t in message.tool_calls]
+            })
+
+            # Execute tools
+            for tool_call in message.tool_calls:
+                name = tool_call.function.name
+                args = {}
+                if tool_call.function.arguments:
+                    args = json.loads(tool_call.function.arguments)
                 
-                # Check safety boundary (Guardrails validation)
                 is_safe = True
                 explanation = "Action classified as safe."
 
-                # If the tool is shell command run, we analyze the command string directly
                 if name == "run_system_shell_command":
                     command_str = args.get("command", "")
                     sec_level, explanation = CommandGuard.analyze_command(command_str)
                     
                     if sec_level == SecurityLevel.BLOCKED:
-                        # Hard block immediate halt
                         tool_result = f"Security Error: Command blocked by system guardrails. Reason: {explanation}"
                         self.memory.log_command(self.session_id, command_str, tool_result, -1, is_blocked=True)
                         is_safe = False
                     elif sec_level == SecurityLevel.RISKY:
-                        # Risk confirmation request
                         logger.info(f"Triggering security callback confirmation for command: {command_str}")
                         user_approved = self.confirm_callback(command_str, explanation)
                         if not user_approved:
@@ -200,7 +177,6 @@ class AgentLoop:
                             self.memory.log_command(self.session_id, command_str, tool_result, -1, is_blocked=True)
                             is_safe = False
                 
-                # General non-shell tools can also trigger confirmation checking (e.g. killing ports or removing files)
                 elif name in ("kill_process_by_port", "create_file"):
                     explanation = f"Tool '{name}' executes file modification or system process termination actions."
                     if settings.safe_mode_enabled:
@@ -210,31 +186,25 @@ class AgentLoop:
                             tool_result = "Security Error: Tool execution denied by the user."
                             is_safe = False
 
-                # Trigger execution if passed checks
                 if is_safe:
                     if streaming_callback:
                         streaming_callback(f"[dim italic]Executing tool: {name}...[/dim italic]\n")
                     
-                    tool_result = tool_registry.execute_tool(name, **args)
+                    tool_result = await tool_registry.execute_tool(name, **args)
                     
-                    # Log run command metrics if shell
                     if name == "run_system_shell_command":
                         cmd_str = args.get("command", "")
-                        # Try parsing code if present
                         exit_code = 0 if "Exit Code: 0" in tool_result else -1
                         self.memory.log_command(self.session_id, cmd_str, tool_result, exit_code)
 
-                # Feed tool result back to Gemini Chat Session history as a function part
-                part = content_types.Part.from_function_response(
-                    name=name,
-                    response={"result": tool_result}
-                )
-                
-                # Feed back as next message to Gemini
-                # We update the current_prompt reference to loop again with the tool output
-                current_prompt = part
+                # Append tool result to history
+                self.history.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": name,
+                    "content": tool_result
+                })
 
-        # Reach here if loop steps exceeded
         timeout_msg = "Error: Multi-step planning execution limit reached without resolving final state."
         logger.error(timeout_msg)
         self.memory.add_message(self.session_id, "model", timeout_msg)

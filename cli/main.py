@@ -53,9 +53,9 @@ def cli_confirm_callback(command: str, reason: str) -> bool:
 
 async def run_goal_async(prompt_text: str):
     """Orchestrates running a single natural language task with an animated loading spinner."""
-    # Check if Gemini key is set before running
-    if not settings.gemini_api_key:
-        console.print("[danger]Error: GEMINI_API_KEY environment variable is not configured.[/danger]")
+    # Check if Groq key is set before running
+    if not settings.groq_api_key:
+        console.print("[danger]Error: GROQ_API_KEY environment variable is not configured.[/danger]")
         console.print("Please set it in your .env file or export it in your shell environment.")
         raise typer.Exit(code=1)
 
@@ -66,12 +66,12 @@ async def run_goal_async(prompt_text: str):
         if "Executing tool" in text:
             console.print(f"[info]⚡ {text.strip()}[/info]")
 
-    with console.status("[bold blue]GenAIShell is planning and executing your goal...[/bold blue]", spinner="dots"):
-        try:
-            response = await agent.execute_goal(prompt_text, streaming_callback=stream_cb)
-        except Exception as e:
-            console.print(f"[danger]Execution failed with error: {e}[/danger]")
-            raise typer.Exit(code=1)
+    console.print("\n[bold blue]GenAIShell is planning and executing your goal...[/bold blue]")
+    try:
+        response = await agent.execute_goal(prompt_text, streaming_callback=stream_cb)
+    except Exception as e:
+        console.print(f"[danger]Execution failed with error: {e}[/danger]")
+        raise typer.Exit(code=1)
 
     console.print("\n")
     console.print(Panel(Markdown(response), title="[bold green]GenAIShell Response[/bold green]", border_style="green"))
@@ -98,8 +98,8 @@ def interactive():
     )
     console.print(Panel(welcome_msg, border_style="cyan"))
 
-    if not settings.gemini_api_key:
-        console.print("[danger]Error: GEMINI_API_KEY environment variable is missing. Set it in .env to continue.[/danger]")
+    if not settings.groq_api_key:
+        console.print("[danger]Error: GROQ_API_KEY environment variable is missing. Set it in .env to continue.[/danger]")
         raise typer.Exit(code=1)
 
     agent = AgentLoop(session_id=session_id, confirm_callback=cli_confirm_callback)
@@ -119,8 +119,8 @@ def interactive():
                 if "Executing tool" in text:
                     console.print(f"[info]⚡ {text.strip()}[/info]")
 
-            with console.status("[bold blue]Thinking...[/bold blue]", spinner="growHorizontal"):
-                response = asyncio.run(agent.execute_goal(user_input, streaming_callback=stream_cb))
+            console.print("\n[bold blue]Thinking...[/bold blue]")
+            response = asyncio.run(agent.execute_goal(user_input, streaming_callback=stream_cb))
 
             console.print("\n")
             console.print(Panel(Markdown(response), title="[bold green]GenAIShell Response[/bold green]", border_style="green"))
@@ -185,7 +185,7 @@ def docs_index(
         for i in range(0, len(words), chunk_size):
             chunks.append(" ".join(words[i:i+chunk_size]))
 
-        console.print(f"[info]Generating vector embeddings for {len(chunks)} chunks using Gemini API...[/info]")
+        console.print(f"[info]Generating vector embeddings for {len(chunks)} chunks using local model...[/info]")
         
         with console.status("[bold blue]Computing embeddings...[/bold blue]", spinner="earth"):
             for idx, chunk in enumerate(chunks):

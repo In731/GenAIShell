@@ -8,8 +8,8 @@ class Settings(BaseSettings):
     """System-wide configuration settings loaded from environment variables and verified using Pydantic."""
     
     # API Settings
-    gemini_api_key: Optional[str] = Field(default=None, validation_alias="GEMINI_API_KEY")
-    gemini_model: str = Field(default="gemini-2.0-flash", validation_alias="GEMINI_MODEL") # gemini-2.0-flash is the current stable model
+    groq_api_key: Optional[str] = Field(default=None, validation_alias="GROQ_API_KEY")
+    groq_model: str = Field(default="llama-3.3-70b-versatile", validation_alias="GROQ_MODEL")
     
     # Security Settings
     safe_mode_enabled: bool = Field(default=True, validation_alias="SAFE_MODE_ENABLED")
